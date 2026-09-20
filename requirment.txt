@@ -1,0 +1,4 @@
+pour lancer le frontend:
+1-python -m pip install streamlit-option-menu
+2-cd frontend
+3-streamlit run main.py
