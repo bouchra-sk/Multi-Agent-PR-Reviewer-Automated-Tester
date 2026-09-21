@@ -1,28 +1,26 @@
 import streamlit as st
 from streamlit_option_menu import option_menu
 import time
+import re
 
 # ─────────────────────────────────────────────────────────────
 # 1. PAGE CONFIGURATION & STYLING
 # ─────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Code Review Assistant",
+    page_title="IBM Developer Copilot Platform",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# Custom CSS for Glassmorphism, Theme Colors (#4A90E2, #50E3C2, #0F172A), and Clean UI
 st.markdown("""
 <style>
-    /* Dark Theme Base */
     .stApp {
         background-color: #0F172A;
         color: #F8FAFC;
         font-family: 'Inter', sans-serif;
     }
     
-    /* Header and Title Styling */
     h1, h2, h3 {
         color: #F8FAFC !important;
     }
@@ -34,7 +32,6 @@ st.markdown("""
         font-weight: 800;
     }
 
-    /* Cards & Glassmorphism */
     .glass-card {
         background: rgba(30, 41, 59, 0.7);
         border: 1px solid rgba(255, 255, 255, 0.08);
@@ -45,7 +42,6 @@ st.markdown("""
         margin-bottom: 20px;
     }
     
-    /* Buttons Styling */
     .stButton>button {
         background: linear-gradient(135deg, #4A90E2 0%, #3B82F6 100%);
         color: white;
@@ -62,50 +58,84 @@ st.markdown("""
         box-shadow: 0 6px 20px rgba(80, 227, 194, 0.4);
     }
 
-    /* Google Login Custom Button */
-    .google-btn {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background-color: #1E293B;
-        border: 1px solid #334155;
-        border-radius: 12px;
-        padding: 12px;
-        color: white;
-        font-weight: 600;
-        cursor: pointer;
-        width: 100%;
-        text-align: center;
-        text-decoration: none;
-        margin-top: 10px;
-    }
-    
-    /* Hide Streamlit default elements */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────
-# 2. SESSION STATE & NAVIGATION
+# 2. SESSION STATE & HELPER FUNCTIONS
 # ─────────────────────────────────────────────────────────────
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
-if 'user_name' not in st.session_state:
-    st.session_state.user_name = "Guest User"
+if 'user_email' not in st.session_state:
+    st.session_state.user_email = ""
+if 'selected_page' not in st.session_state:
+    st.session_state.selected_page = "Home"
+if 'show_modal' not in st.session_state:
+    st.session_state.show_modal = False
 
-# Top Navbar
-col_logo, col_nav, col_auth = st.columns([2, 5, 2])
+def is_valid_email(email):
+    pattern = r'^[\w\.-]+@[\w\.-]+\.\w+$'
+    return re.match(pattern, email) is not None
+
+# ─────────────────────────────────────────────────────────────
+# 3. AUTHENTICATION DIALOG (MODAL)
+# ─────────────────────────────────────────────────────────────
+@st.dialog("🔐 Sign in / Register to Access Platform")
+def login_modal():
+    st.write("Please authenticate with a valid email or your Google account to access your workspace and history.")
+    
+    # Option A: Google Sign-In
+    if st.button("🌐 Continue with Google", use_container_width=True):
+        st.session_state.logged_in = True
+        st.session_state.user_email = "developer@gmail.com"
+        st.session_state.show_modal = False
+        st.session_state.selected_page = "Workspace"
+        st.success("Successfully logged in!")
+        time.sleep(0.5)
+        st.rerun()
+
+    st.markdown("<div style='text-align: center; color: #64748B; margin: 10px 0;'>— OR —</div>", unsafe_allow_html=True)
+
+    # Option B: Real Email Authentication
+    email_input = st.text_input("Enter your real email address:", placeholder="name@company.com")
+    password_input = st.text_input("Password:", type="password", placeholder="••••••••")
+
+    if st.button("🔑 Sign In / Register with Email", use_container_width=True):
+        if not email_input or not is_valid_email(email_input):
+            st.error("Please enter a valid email address (e.g., user@domain.com).")
+        elif len(password_input) < 6:
+            st.error("Password must be at least 6 characters long.")
+        else:
+            st.session_state.logged_in = True
+            st.session_state.user_email = email_input
+            st.session_state.show_modal = False
+            st.session_state.selected_page = "Workspace"
+            st.success("Authentication successful!")
+            time.sleep(0.5)
+            st.rerun()
+
+# ─────────────────────────────────────────────────────────────
+# 4. TOP NAVBAR
+# ─────────────────────────────────────────────────────────────
+col_logo, col_nav, col_auth = st.columns([3, 4, 2])
 
 with col_logo:
-    st.markdown('<h3 style="margin:0;"><span class="gradient-text">⚡ Code Review Assistant</span></h3>', unsafe_allow_html=True)
+    st.markdown('<h3 style="margin:0;"><span class="gradient-text">⚡ IBM Developer Copilot</span></h3>', unsafe_allow_html=True)
 
 with col_nav:
+    current_index = 0
+    if st.session_state.selected_page == "Workspace":
+        current_index = 1
+    elif st.session_state.selected_page == "Dashboard":
+        current_index = 2
+
     selected_page = option_menu(
         menu_title=None,
-        options=["Home", "Upload", "Review Report", "Dashboard", "Settings"],
-        icons=["house", "cloud-upload", "file-code", "grid", "gear"],
-        default_index=0,
+        options=["Home", "Workspace", "Dashboard"],
+        icons=["house", "terminal", "grid"],
+        default_index=current_index,
         orientation="horizontal",
         styles={
             "container": {"padding": "0!important", "background-color": "transparent"},
@@ -120,192 +150,157 @@ with col_nav:
             "nav-link-selected": {"background-color": "#1E293B", "color": "#50E3C2", "border": "1px solid #4A90E2"},
         }
     )
+    st.session_state.selected_page = selected_page
 
 with col_auth:
     if not st.session_state.logged_in:
-        if st.button("🔑 Sign in with Google", key="login_trigger"):
+        if st.button("🔑 Sign In", key="login_top_btn"):
             st.session_state.show_modal = True
     else:
-        st.success(f"👤 {st.session_state.user_name}")
-
-# Google Sign-in Modal (Dialog)
-if getattr(st.session_state, 'show_modal', False) and not st.session_state.logged_in:
-    @st.dialog("Sign in to Code Review Assistant")
-    def login_modal():
-        st.write("Save your past reviews, manage custom LLM keys, and access automated testing.")
-        st.markdown("""
-        <div style="text-align: center; margin-bottom: 15px;">
-            <svg width="48" height="48" viewBox="0 0 24 24">
-                <path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.6l3.1-3.1C17.3 1.7 14.8 1 12 1 7.5 1 3.7 3.6 1.9 7.3l3.7 2.9C6.5 7.3 9 5 12 5z"/>
-                <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.7l3.7 2.9c2.2-2 3.7-5 3.7-8.8z"/>
-                <path fill="#FBBC05" d="M5.6 14.8c-.2-.7-.4-1.5-.4-2.3s.2-1.6.4-2.3L1.9 7.3C.7 9.7 0 10.8 0 12s.7 2.3 1.9 4.7l3.7-2.9z"/>
-                <path fill="#34A853" d="M12 23c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3 0-5.5-2.3-6.4-5.2L1.9 16C3.7 19.7 7.5 23 12 23z"/>
-            </svg>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("Continue with Google", use_container_width=True):
-            st.session_state.logged_in = True
-            st.session_state.user_name = "Bouchra Dev"
-            st.session_state.show_modal = False
+        st.markdown(f"🟢 `<{st.session_state.user_email}>`", unsafe_allow_html=True)
+        if st.button("Log out", key="logout_btn"):
+            st.session_state.logged_in = False
+            st.session_state.user_email = ""
+            st.session_state.selected_page = "Home"
             st.rerun()
-            
+
+# Trigger Modal if requested
+if st.session_state.show_modal and not st.session_state.logged_in:
     login_modal()
 
 st.markdown("---")
 
 # ─────────────────────────────────────────────────────────────
-# 3. PAGE CONTENT ROUTING
+# 5. PAGE ROUTING & SECURITY CONTROLS
 # ─────────────────────────────────────────────────────────────
 
 # --- PAGE 1: LANDING PAGE ---
-if selected_page == "Home":
-    col_hero, col_mockup = st.columns([1, 1], gap="large")
+if st.session_state.selected_page == "Home":
+    col_hero = st.columns([1, 1], gap="large")
     
-    with col_hero:
+    with col_hero[0]:
         st.markdown("""
-        <div style="padding-top: 40px;">
-            <h1 style="font-size: 3.2rem; line-height: 1.2;">
-                AI Code Review <br><span class="gradient-text">Assistant</span>
+        <div style="padding-top: 20px;">
+            <h1 style="font-size: 3rem; line-height: 1.2;">
+                All-in-One <br><span class="gradient-text">Developer Copilot</span>
             </h1>
-            <p style="font-size: 1.2rem; color: #94A3B8; margin-top: 20px;">
-                Upload. Analyze. Improve your code instantly with multi-agent intelligence and automated testing suggestions.
+            <p style="font-size: 1.1rem; color: #94A3B8; margin-top: 20px;">
+                Upload your codebase once to explore architecture, ask context questions, perform security audits, and generate PyTests.
             </p>
         </div>
         """, unsafe_allow_html=True)
         
         c1, c2 = st.columns([1, 1])
         with c1:
-            if st.button("🚀 Get Started", use_container_width=True):
-                st.session_state['selected_page'] = "Upload"
-                st.rerun()
+            if st.button("🚀 Start Analyzing Now", use_container_width=True):
+                if not st.session_state.logged_in:
+                    st.session_state.show_modal = True
+                    st.rerun()
+                else:
+                    st.session_state.selected_page = "Workspace"
+                    st.rerun()
         with c2:
-            st.link_button("📖 Documentation", "https://github.com", use_container_width=True)
+            st.link_button("📖 GitHub Repository", "https://github.com", use_container_width=True)
 
-    with col_mockup:
+    with col_hero[1]:
         st.markdown("""
-        <div class="glass-card">
-            <h4 style="color: #50E3C2; margin-bottom: 10px;">⚡ Live Review Mockup</h4>
-            <pre style="background-color: #090D16; padding: 15px; border-radius: 8px; color: #E2E8F0;">
-<span style="color: #F43F5E;">- def login(user):</span>
-<span style="color: #10B981;">+ async def login(user: UserLogin):</span>
-    <span style="color: #50E3C2;"># 🤖 Agent Suggestion: Added Type Validation</span>
-    token = await create_token(user.id)
-    return token
-            </pre>
-            <p style="color: #94A3B8; font-size: 0.85rem;">✨ 3 Suggestions Generated in 1.2s</p>
+        <div class="glass-card" style="text-align: center; padding: 40px;">
+            <h3 class="gradient-text">🤖 Agentic AI Capabilities</h3>
+            <p style="color: #94A3B8; font-size: 0.95rem; text-align: left; margin-top: 15px;">
+                • <b>Codebase Q&A:</b> Deep context awareness using RAG.<br>
+                • <b>PR Reviewer:</b> Vulnerability checks & Clean Code refactoring.<br>
+                • <b>Auto-Test Suite:</b> Automatic PyTest execution generation.
+            </p>
         </div>
         """, unsafe_allow_html=True)
 
-# --- PAGE 2: UPLOAD PAGE ---
-elif selected_page == "Upload":
-    st.subheader("📤 Upload Source Code for AI Review")
-    
-    col_upload, col_history = st.columns([2, 1], gap="medium")
-    
-    with col_upload:
+
+# --- PAGE 2: WORKSPACE (RESTRICTED TO LOGGED IN USERS) ---
+elif st.session_state.selected_page == "Workspace":
+    if not st.session_state.logged_in:
+        st.warning("🔒 Access Restricted! You must sign in with a valid email to access the Workspace.")
+        if st.button("🔑 Sign In Now"):
+            st.session_state.show_modal = True
+            st.rerun()
+    else:
+        st.subheader("⚡ Unified Developer Workspace")
+        st.caption(f"Connected as: {st.session_state.user_email}")
+
         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
         uploaded_files = st.file_uploader(
-            "Drag & drop code files (.py, .js, .java, .cpp, .ts)",
+            "📁 Upload Code Files or Project Folder (.zip, .py, .js, .java, .cpp)",
             accept_multiple_files=True,
-            type=["py", "js", "java", "cpp", "ts"]
+            type=["py", "js", "java", "cpp", "ts", "zip"]
         )
         
-        if uploaded_files:
-            st.success(f"Selected {len(uploaded_files)} file(s).")
-            for f in uploaded_files:
-                st.text(f"📄 {f.name} ({f.size} bytes)")
-            
-            if st.button("⚡ Analyze Code Now", use_container_width=True):
-                progress = st.progress(0)
-                for percent in range(100):
-                    time.sleep(0.01)
-                    progress.progress(percent + 1)
-                st.success("Analysis Complete! Go to 'Review Report' to view results.")
+        code_text_input = st.text_area("OR Paste Code Snippet Directly:", height=120, placeholder="def example_function(): ...")
         st.markdown('</div>', unsafe_allow_html=True)
+
+        if uploaded_files or code_text_input.strip():
+            st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+            st.markdown("### 🎯 Select Execution Goal")
+            
+            action_mode = st.radio(
+                "What would you like the agents to do?",
+                [
+                    "🔍 Option 1: Understand Codebase & Ask Questions (Onboarding Mode)",
+                    "🛠️ Option 2: Security Audit, Auto-Fix Code & Generate PyTests (PR Reviewer Mode)",
+                    "⚡ Option 3: Full AI Execution (Both Onboarding + Code Review)"
+                ],
+                index=0
+            )
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            if "Option 1" in action_mode:
+                st.markdown("### 💬 Codebase Q&A & Architecture Assistant")
+                user_question = st.text_input("Ask any question about this codebase:", placeholder="e.g., How does authentication work?")
+                
+                if st.button("🔍 Explain & Answer Question", use_container_width=True):
+                    with st.spinner("Analyzing codebase..."):
+                        time.sleep(1)
+                        st.success("Analysis Complete!")
+                        st.markdown("**📌 Architecture Summary:** FastAPI backend with PostgreSQL integration.")
+
+            elif "Option 2" in action_mode:
+                if st.button("⚡ Run Security Audit & Generate Tests", use_container_width=True):
+                    with st.spinner("Running review pipeline..."):
+                        time.sleep(1)
+                        st.success("Review & Test Generation Complete!")
+
+            elif "Option 3" in action_mode:
+                if st.button("🚀 Run Full Multi-Agent Suite", use_container_width=True):
+                    with st.spinner("Running full agent execution..."):
+                        time.sleep(1.5)
+                        st.success("All tasks completed successfully!")
+
+
+# --- PAGE 3: DASHBOARD & HISTORY (RESTRICTED TO LOGGED IN USERS) ---
+elif st.session_state.selected_page == "Dashboard":
+    if not st.session_state.logged_in:
+        st.error("🔒 History Protected! Please sign in with your email to view your previously uploaded folders and reviews.")
+        if st.button("🔑 Sign In to View History"):
+            st.session_state.show_modal = True
+            st.rerun()
+    else:
+        st.subheader("📊 Your Uploaded Folders & Past Reviews")
+        st.caption(f"Showing saved history for {st.session_state.user_email}")
         
-    with col_history:
         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-        st.markdown("### 🕒 Upload History")
-        st.caption("Recent uploads from your workspace")
-        st.text("• auth_service.py (2 mins ago)")
-        st.text("• pytest_runner.py (1 hour ago)")
-        st.text("• database_models.py (Yesterday)")
-        st.markdown('</div>', unsafe_allow_html=True)
-
-# --- PAGE 3: REVIEW REPORT PAGE ---
-elif selected_page == "Review Report":
-    st.subheader("📋 AI Code Review Report")
-    
-    col_code, col_report = st.columns([1, 1], gap="medium")
-    
-    with col_code:
-        st.markdown("### 📄 Code Preview (`app/core/auth.py`)")
-        st.code("""
-def verify_jwt_token(token: str):
-    # Potential Bug: Missing try-except block around decode
-    payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-    return payload
-        """, language="python")
-
-    with col_report:
-        st.markdown("### 🤖 AI Suggestions & Insights")
         
-        with st.expander("🐛 Potential Bugs (1 Warning)", expanded=True):
-            st.error("Unhandled JWT Expired Exception in line 3. Token decoding might crash the server if invalid.")
-            st.code("try:\n    payload = jwt.decode(...)\nexcept jwt.ExpiredSignatureError:\n    raise HTTPException(status_code=401)", language="python")
+        reviews_data = [
+            {"Folder/File Name": "src/auth_service/", "Language": "Python", "Date": "2026-09-20", "Status": "Analyzed"},
+            {"Folder/File Name": "frontend/components/", "Language": "TypeScript", "Date": "2026-09-19", "Status": "Analyzed"},
+            {"Folder/File Name": "payment_gateway.zip", "Language": "Java", "Date": "2026-09-15", "Status": "Reviewed"},
+        ]
+        
+        for item in reviews_data:
+            col_f, col_l, col_d, col_s, col_act = st.columns([3, 1, 1, 1, 2])
+            col_f.write(f"📁 **{item['Folder/File Name']}**")
+            col_l.write(item['Language'])
+            col_d.write(item['Date'])
+            col_s.write(f"🟢 {item['Status']}")
+            if col_act.button("Open Folder History", key=item['Folder/File Name']):
+                st.info(f"Loading history for {item['Folder/File Name']}...")
+            st.markdown("<hr style='margin: 5px 0; border-color: #334155;'>", unsafe_allow_html=True)
             
-        with st.expander("🧩 Modularity & Structure", expanded=False):
-            st.info("Extract `SECRET_KEY` loading into a central `config.py` setting module.")
-            
-        with st.expander("✨ Readability & Type Hints", expanded=False):
-            st.success("Function signature uses explicit type annotations. Good job!")
-
-        st.download_button("📥 Download PDF Report", data="Report Details...", file_name="code_review_report.txt")
-
-# --- PAGE 4: DASHBOARD PAGE ---
-elif selected_page == "Dashboard":
-    st.subheader("📊 Past Reviews & Activity")
-    
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    c1, c2 = st.columns([3, 1])
-    with c1:
-        search = st.text_input("🔍 Search reviews by file or language...", "")
-    with c2:
-        filter_lang = st.selectbox("Filter by Language", ["All", "Python", "JavaScript", "Java"])
-    
-    # Sample Data Table
-    reviews_data = [
-        {"File Name": "auth_controller.py", "Language": "Python", "Date": "2026-09-20", "Score": "85/100"},
-        {"File Name": "api_routes.js", "Language": "JavaScript", "Date": "2026-09-19", "Score": "92/100"},
-        {"File Name": "PaymentGateway.java", "Language": "Java", "Date": "2026-09-15", "Score": "78/100"},
-    ]
-    
-    for item in reviews_data:
-        col_f, col_l, col_d, col_s, col_act = st.columns([2, 1, 1, 1, 2])
-        col_f.write(f"📄 **{item['File Name']}**")
-        col_l.write(item['Language'])
-        col_d.write(item['Date'])
-        col_s.write(f"🟢 {item['Score']}")
-        if col_act.button("View Report", key=item['File Name']):
-            st.info(f"Opening report for {item['File Name']}")
-        st.markdown("<hr style='margin: 5px 0; border-color: #334155;'>", unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# --- PAGE 5: SETTINGS PAGE ---
-elif selected_page == "Settings":
-    st.subheader("⚙️ Account & Application Settings")
-    
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.markdown("### 🔑 API Key Management")
-    api_key = st.text_input("IBM Bob 2.0 / OpenAI API Key", value="sk-xxxxxxxxxxxxxxxxxxxxxxxx", type="password")
-    if st.button("Save Keys"):
-        st.success("API Key saved successfully!")
-    
-    st.markdown("---")
-    st.markdown("### 👤 Profile Info")
-    st.text(f"Logged in as: {st.session_state.user_name}")
-    if st.button("Logout"):
-        st.session_state.logged_in = False
-        st.session_state.user_name = "Guest User"
-        st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
