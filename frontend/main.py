@@ -199,8 +199,7 @@ if st.session_state.selected_page == "Home":
                 else:
                     st.session_state.selected_page = "Workspace"
                     st.rerun()
-        with c2:
-            st.link_button("📖 GitHub Repository", "https://github.com", use_container_width=True)
+        
 
     with col_hero[1]:
         st.markdown("""
