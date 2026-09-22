@@ -1,4 +1,4 @@
-from AI.indexing_agent import IndexingAgent
+from backend.indexing_agent import IndexingAgent
 
 
 agent = IndexingAgent()
