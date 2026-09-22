@@ -2,6 +2,14 @@ import streamlit as st
 from streamlit_option_menu import option_menu
 import time
 import re
+import requests
+
+# ─────────────────────────────────────────────────────────────
+# 0. BACKEND CONFIG
+# ─────────────────────────────────────────────────────────────
+# URL du backend FastAPI (Agent 1 : Indexing & Parsing Agent).
+# En local, uvicorn tourne par défaut sur le port 8000.
+BACKEND_URL = "http://localhost:8000"
 
 # ─────────────────────────────────────────────────────────────
 # 1. PAGE CONFIGURATION & STYLING
@@ -74,6 +82,8 @@ if 'selected_page' not in st.session_state:
     st.session_state.selected_page = "Home"
 if 'show_modal' not in st.session_state:
     st.session_state.show_modal = False
+if 'last_project_id' not in st.session_state:
+    st.session_state.last_project_id = None
 
 def is_valid_email(email):
     pattern = r'^[\w\.-]+@[\w\.-]+\.\w+$'
@@ -252,13 +262,70 @@ elif st.session_state.selected_page == "Workspace":
 
             if "Option 1" in action_mode:
                 st.markdown("### 💬 Codebase Q&A & Architecture Assistant")
-                user_question = st.text_input("Ask any question about this codebase:", placeholder="e.g., How does authentication work?")
-                
-                if st.button("🔍 Explain & Answer Question", use_container_width=True):
-                    with st.spinner("Analyzing codebase..."):
-                        time.sleep(1)
-                        st.success("Analysis Complete!")
-                        st.markdown("**📌 Architecture Summary:** FastAPI backend with PostgreSQL integration.")
+
+                # L'Agent 1 (backend) attend un .zip du projet.
+                # On isole le premier fichier .zip parmi ceux uploadés.
+                zip_file = next(
+                    (f for f in (uploaded_files or []) if f.name.lower().endswith(".zip")),
+                    None,
+                )
+
+                if uploaded_files and zip_file is None:
+                    st.warning(
+                        "Pour cette étape, l'Agent d'indexation a besoin d'un fichier "
+                        "**.zip** du projet complet (pas de fichiers individuels)."
+                    )
+
+                if st.button(
+                    "🔍 Indexer le projet",
+                    use_container_width=True,
+                    disabled=zip_file is None,
+                ):
+                    with st.spinner("Extraction, découpage et indexation du code en cours..."):
+                        try:
+                            response = requests.post(
+                                f"{BACKEND_URL}/index",
+                                files={
+                                    "file": (
+                                        zip_file.name,
+                                        zip_file.getvalue(),
+                                        "application/zip",
+                                    )
+                                },
+                                timeout=120,
+                            )
+                            response.raise_for_status()
+                            result = response.json()
+                            st.session_state.last_project_id = result["project_id"]
+
+                            st.success(
+                                f"Projet indexé : {result['nb_files_indexed']} fichiers, "
+                                f"{result['nb_chunks_indexed']} chunks."
+                            )
+                            with st.expander("📂 Arborescence du projet"):
+                                st.code(result["folder_tree"], language="text")
+
+                        except requests.exceptions.ConnectionError:
+                            st.error(
+                                "Impossible de contacter le backend. Vérifie que le serveur "
+                                "tourne bien (`uvicorn main:app --reload --port 8000`)."
+                            )
+                        except Exception as e:
+                            st.error(f"Erreur lors de l'indexation : {e}")
+
+                st.markdown("---")
+                user_question = st.text_input(
+                    "Pose une question sur ce codebase :",
+                    placeholder="ex: Comment fonctionne l'authentification ?",
+                )
+                if st.button("Poser la question", use_container_width=True):
+                    if st.session_state.last_project_id is None:
+                        st.warning("Indexe d'abord un projet avant de poser une question.")
+                    else:
+                        st.info(
+                            "Le Q&A Copilot (Agent 3) n'est pas encore branché — seule "
+                            "l'indexation (Agent 1) est connectée pour l'instant."
+                        )
 
             elif "Option 2" in action_mode:
                 if st.button("⚡ Run Security Audit & Generate Tests", use_container_width=True):
