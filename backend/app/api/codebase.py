@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from backend.indexing_agent import IndexingAgent
+from backend.Agent1.indexing_agent import IndexingAgent
 from backend.app.models.codebase import CodebaseIndexRequest, CodebaseIndexResponse
 
 router = APIRouter(prefix="/api/v1/codebase", tags=["Codebase"])

@@ -1,4 +1,4 @@
-from backend.indexing_agent import IndexingAgent
+from backend.Agent1.indexing_agent import IndexingAgent
 
 
 agent = IndexingAgent()

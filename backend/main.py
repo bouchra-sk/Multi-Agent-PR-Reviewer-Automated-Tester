@@ -6,9 +6,9 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 # --- IMPORTS DES AUTRES FICHIERS DU PROJET ---
-from parsing import extract_zip, build_folder_tree, build_chunks
-from rag import index_chunks
-from indexing_agent import IndexingAgent  # Import de ton agent d'indexation
+from backend.Agent1.parsing import extract_zip, build_folder_tree, build_chunks
+from backend.Agent1.rag import index_chunks
+from backend.Agent1.indexing_agent import IndexingAgent  # Import de ton agent d'indexation
 
 app = FastAPI(title="Codebase Indexing Agent")
 
