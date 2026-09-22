@@ -1,14 +1,13 @@
-# backend/app/config.py
+# backend/config.py
 import os
-from pydantic_settings import BaseSettings
+from pathlib import Path
+from dotenv import load_dotenv
 
-class Settings(BaseSettings):
-    SECRET_KEY: str
-    ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
-    API_KEY: str  
+BASE_DIR = Path(__file__).resolve().parent
+ENV_PATH = BASE_DIR / ".env"
 
-    class Config:
-        env_file = ".env"
+if ENV_PATH.exists():
+    load_dotenv(dotenv_path=ENV_PATH, override=True)
 
-settings = Settings()
+LLM_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("Secret_Key", "")
+LLM_API_URL = os.getenv("LLM_API_URL", "https://api.lablab.ai/v1")
