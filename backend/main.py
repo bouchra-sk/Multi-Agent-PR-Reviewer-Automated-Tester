@@ -13,13 +13,19 @@ import uuid
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from backend.Agent1.parsing import extract_zip, build_folder_tree, build_chunks
 from backend.Agent1.rag import index_chunks
 from backend.Agent_b.state import FOLDER_TREES
 from backend.Agent_b.archi_agent import summarize_architecture
+from backend.Agent3.qa_agent import answer_question
 
 app = FastAPI(title="Codebase Indexing Agent")
+
+
+class QuestionRequest(BaseModel):
+    question: str
 
 # Autorise Streamlit (généralement sur localhost:8501) à appeler ce backend
 app.add_middleware(
@@ -119,3 +125,30 @@ def get_architecture_summary(project_id: str):
         raise HTTPException(status_code=502, detail=f"Erreur lors de l'appel au LLM : {e}")
 
     return {"project_id": project_id, "architecture_summary": summary}
+
+
+@app.post("/ask/{project_id}")
+def ask_question(project_id: str, payload: QuestionRequest):
+    """Agent 3 : répond à une question sur le codebase indexé."""
+    if project_id not in FOLDER_TREES:
+        raise HTTPException(
+            status_code=404,
+            detail="Projet inconnu — indexe-le d'abord via POST /index.",
+        )
+
+    question = payload.question.strip()
+    if not question:
+        raise HTTPException(status_code=422, detail="La question ne peut pas être vide.")
+
+    try:
+        answer = answer_question(project_id, question)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Erreur lors de l'appel au LLM : {e}") from e
+
+    return {
+        "project_id": project_id,
+        "question": question,
+        "answer": answer,
+    }

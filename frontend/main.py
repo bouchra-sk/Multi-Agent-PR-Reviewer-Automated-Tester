@@ -321,11 +321,38 @@ elif st.session_state.selected_page == "Workspace":
                 if st.button("Poser la question", use_container_width=True):
                     if st.session_state.last_project_id is None:
                         st.warning("Indexe d'abord un projet avant de poser une question.")
+                    elif not user_question.strip():
+                        st.warning("Écris une question avant de cliquer sur le bouton.")
                     else:
-                        st.info(
-                            "Le Q&A Copilot (Agent 3) n'est pas encore branché — seule "
-                            "l'indexation (Agent 1) est connectée pour l'instant."
-                        )
+                        with st.spinner(
+                            "Recherche RAG & génération de la réponse par l'Agent 3..."
+                        ):
+                            try:
+                                response = requests.post(
+                                    f"{BACKEND_URL}/ask/{st.session_state.last_project_id}",
+                                    json={"question": user_question},
+                                    timeout=120,
+                                )
+                                response.raise_for_status()
+                                result = response.json()
+                                st.markdown("### 🤖 Réponse de l'Agent 3 (Copilot Q&A)")
+                                st.write(result["answer"])
+                            except requests.exceptions.ConnectionError:
+                                st.error(
+                                    "Impossible de contacter le backend. Vérifie que le serveur "
+                                    "FastAPI fonctionne sur le port 8000."
+                                )
+                            except requests.exceptions.HTTPError as error:
+                                st.error(
+                                    f"Le backend a retourné une erreur HTTP "
+                                    f"({error.response.status_code}) : {error.response.text}"
+                                )
+                            except requests.exceptions.RequestException as error:
+                                st.error(f"Erreur lors de la requête vers l'Agent 3 : {error}")
+                            except KeyError:
+                                st.error(
+                                    "Réponse invalide du backend : le champ 'answer' est absent."
+                                )
 
             elif "Option 2" in action_mode:
                 if st.button("⚡ Run Security Audit & Generate Tests", use_container_width=True):
