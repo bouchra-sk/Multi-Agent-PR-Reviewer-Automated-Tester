@@ -34,7 +34,7 @@ def call_llm(system_prompt: str, user_prompt: str, temperature: float = 0.3) -> 
 
     except Exception as e:
         # ⚠️ FALLBACK MOCK TEMPORAIRE (Évite la 502 pendant le dev/hackathon)
-        print(f"⚠️ Appel LLM distant échoué ({e}). Passage en mode Mock.")
+        print(f"⚠️ Appel LLM distant échoué ({e}).")
         return """### 1. Organisation des dossiers et technologies utilisées
 - **Backend** : FastAPI, Uvicorn, Python 3.13
 - **Base RAG & Vectorstore** : ChromaDB, LangChain

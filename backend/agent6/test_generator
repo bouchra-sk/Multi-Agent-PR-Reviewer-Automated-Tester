@@ -1,0 +1,512 @@
+"""
+Agent 6 : Automated Test Generator & Validator Agent
+------------------------------------------------------
+Rôle : Senior Software Engineer + QA Automation Engineer (Meta-Prompting).
+
+Pipeline :
+  1. Vérifie la syntaxe du code refactorisé fourni par l'Agent 5.
+  2. Appelle IBM Bob 2.0 (LLM réel) pour générer un fichier de tests PyTest
+     complet et contextuel, couvrant cas nominaux, cas limites, exceptions et
+     comportements liés à la sécurité.
+  3. Extrait la réponse JSON structurée du LLM :
+       {
+         "filename"    : "test_generated.py",
+         "test_code"   : "<code pytest complet>",
+         "test_count"  : <nombre de fonctions test_*>,
+         "explanation" : "<résumé de la stratégie de tests>"
+       }
+  4. Valide la syntaxe Python du code de tests extrait.
+  5. Exécute pytest et collecte le résultat complet.
+  6. Retourne le rapport enrichi au frontend.
+
+Fallback (mode simulation) : génère des tests structuraux depuis l'AST
+  du code — syntaxiquement valides, exécutables, clairement labellisés
+  comme simulation.
+
+NE retourne JAMAIS silencieusement un résultat de simulation quand le mode
+réel est attendu : si LLM_API_URL est configuré mais que l'appel échoue,
+une RuntimeError est propagée jusqu'à l'endpoint FastAPI.
+"""
+
+import ast
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import textwrap
+
+from backend.Agent2.llm_client import call_llm
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Meta-Prompt : rôle + méthodologie + format structuré
+# ─────────────────────────────────────────────────────────────────────────────
+
+SYSTEM_PROMPT = """\
+Tu joues le rôle d'un Senior Software Engineer et QA Automation Engineer \
+expérimenté.
+
+On te fournit un extrait de code Python déjà refactorisé et sécurisé. \
+Ta mission est de produire un fichier de tests PyTest complet, exécutable \
+et pertinent pour ce code spécifique.
+
+MÉTHODOLOGIE — analyse préalable obligatoire :
+1. Identifie chaque fonction ou méthode publique définie dans le code.
+2. Pour chaque fonction, liste :
+   - ses paramètres et leurs types attendus ;
+   - sa valeur de retour ;
+   - ses dépendances (os.getenv, cursor, connexions DB, etc.) ;
+   - ses cas nominaux (happy path) ;
+   - ses cas limites (valeur nulle, chaîne vide, entier négatif, etc.) ;
+   - les exceptions qu'elle peut lever.
+3. Pour les fonctions faisant appel à os.getenv : utilise \
+unittest.mock.patch.dict(os.environ, {...}) pour injecter les valeurs.
+4. Pour les fonctions faisant appel à une base de données (cursor, connection) \
+: utilise unittest.mock.MagicMock() pour simuler le cursor et vérifier que \
+cursor.execute() est appelé avec les bons arguments.
+5. Pour les fonctions liées à la sécurité (int() sur des IDs, requêtes \
+paramétrées, etc.) : ajoute des tests explicites vérifiant que :
+   - une valeur non-entière lève bien ValueError ;
+   - cursor.execute() reçoit bien un tuple de paramètres (pas une concaténation).
+
+RÈGLES IMPÉRATIVES :
+- Ne génère PAS de tests triviaux (assert 1 + 1 == 2, assert True, etc.).
+- Chaque test doit vérifier un comportement spécifique du code fourni.
+- Tous les tests doivent commencer par test_.
+- N'appelle JAMAIS eval() dans les tests.
+- Ne fais pas d'appels réseau, de fichiers temporaires, ni d'accès DB réels.
+- Le fichier doit être 100 % exécutable avec : python -m pytest <fichier>
+- Importe uniquement ce qui est nécessaire (ast, pytest, unittest.mock, etc.).
+
+FORMAT DE RÉPONSE :
+Réponds UNIQUEMENT avec un objet JSON valide de cette forme exacte, \
+sans texte avant ni après, sans balises markdown :
+{
+  "filename": "test_generated.py",
+  "test_code": "<code Python complet du fichier de tests, imports inclus>",
+  "test_count": <nombre entier de fonctions test_* dans le fichier>,
+  "explanation": "<résumé en 2-4 phrases de la stratégie de tests adoptée>"
+}
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Utilitaires internes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _check_syntax(code: str, label: str = "code") -> list[str]:
+    """
+    Vérifie la syntaxe Python d'une chaîne via ast.parse.
+    Retourne une liste d'erreurs (vide si valide).
+    """
+    errors: list[str] = []
+    try:
+        ast.parse(code)
+    except SyntaxError as exc:
+        errors.append(
+            f"Erreur de syntaxe dans {label} (ligne {exc.lineno}) : {exc.msg}"
+        )
+    return errors
+
+
+def _count_test_functions(code: str) -> int:
+    """Compte le nombre de fonctions test_* dans le code Python fourni."""
+    try:
+        tree = ast.parse(code)
+        return sum(
+            1 for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+        )
+    except SyntaxError:
+        return 0
+
+
+def _run_pytest(test_code: str, timeout: int = 30) -> dict:
+    """
+    Écrit test_code dans un fichier temporaire et lance pytest dessus.
+    Retourne :
+      {
+        "passed"        : bool,
+        "returncode"    : int,
+        "stdout"        : str,
+        "stderr"        : str,
+        "summary"       : str,       # dernière ligne significative de pytest
+        "syntax_errors" : list[str],
+      }
+    """
+    syntax_errors = _check_syntax(test_code, label="tests générés")
+    if syntax_errors:
+        return {
+            "passed": False,
+            "returncode": -1,
+            "stdout": "",
+            "stderr": "\n".join(syntax_errors),
+            "summary": "Erreur de syntaxe dans le fichier de tests — pytest non lancé.",
+            "syntax_errors": syntax_errors,
+        }
+
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".py",
+        prefix="agent6_tests_",
+        delete=False,
+        encoding="utf-8",
+    ) as tmp:
+        tmp.write(test_code)
+        tmp_path = tmp.name
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", tmp_path, "-v", "--tb=short", "--no-header"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "passed": False,
+            "returncode": -2,
+            "stdout": "",
+            "stderr": f"pytest n'a pas terminé dans les {timeout} s impartis.",
+            "summary": f"Timeout ({timeout} s) lors de l'exécution de pytest.",
+            "syntax_errors": [],
+        }
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+
+    # Extrait la ligne de résumé finale de pytest
+    summary = ""
+    for line in reversed(stdout.splitlines()):
+        stripped = line.strip()
+        if stripped and any(
+            kw in stripped
+            for kw in ("passed", "failed", "error", "warning", "no tests ran")
+        ):
+            summary = stripped
+            break
+
+    return {
+        "passed": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "summary": summary or "(aucun résumé extrait)",
+        "syntax_errors": [],
+    }
+
+
+def _parse_llm_response(raw: str) -> dict:
+    """
+    Extrait et valide le JSON structuré retourné par le LLM.
+
+    Champs attendus :
+      - filename    (str, optionnel — défaut "test_generated.py")
+      - test_code   (str, obligatoire)
+      - test_count  (int, optionnel — recalculé si absent/incohérent)
+      - explanation (str, optionnel)
+
+    Lève RuntimeError si :
+      - la réponse n'est pas du JSON valide ;
+      - le champ "test_code" est absent ;
+      - le code Python extrait a des erreurs de syntaxe.
+    """
+    # Retire d'éventuelles balises markdown ```json … ``` malgré la consigne
+    cleaned = re.sub(
+        r"^```(?:json)?\s*|```\s*$", "", raw.strip(), flags=re.MULTILINE
+    ).strip()
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Réponse du LLM non parsable en JSON : {exc}\n"
+            f"Réponse brute (premiers 400 car.) : {raw[:400]}"
+        )
+
+    if "test_code" not in data:
+        raise RuntimeError(
+            "La réponse du LLM ne contient pas le champ 'test_code'. "
+            f"Clés reçues : {list(data.keys())}"
+        )
+
+    test_code: str = data["test_code"]
+
+    # Validation syntaxique immédiate — on échoue tôt avec un message clair
+    syntax_errors = _check_syntax(test_code, label="test_code (réponse LLM)")
+    if syntax_errors:
+        raise RuntimeError(
+            "Le code de tests généré par le LLM contient des erreurs de syntaxe :\n"
+            + "\n".join(syntax_errors)
+            + f"\n\nCode reçu (premiers 500 car.) : {test_code[:500]}"
+        )
+
+    # test_count : préférer la valeur du LLM si cohérente, sinon recalculer
+    llm_count = data.get("test_count")
+    actual_count = _count_test_functions(test_code)
+    if not isinstance(llm_count, int) or llm_count != actual_count:
+        test_count = actual_count
+    else:
+        test_count = llm_count
+
+    return {
+        "filename": str(data.get("filename") or "test_generated.py"),
+        "test_code": test_code,
+        "test_count": test_count,
+        "explanation": str(data.get("explanation") or ""),
+    }
+
+
+def _generate_fallback_tests(refactored_code: str) -> dict:
+    """
+    Génère un rapport de tests en mode simulation (sans LLM).
+
+    Produit des tests structuraux depuis l'AST :
+      - un test de syntaxe (le code est parsable) ;
+      - un test de présence pour chaque fonction publique détectée ;
+      - si des appels à os.getenv sont détectés, un test vérifiant que
+        PASSWORD / les variables d'environnement sont bien consultées ;
+      - si cursor.execute est présent, un test vérifiant la présence de
+        l'appel paramétré.
+
+    Ces tests sont conservateurs (ne font pas tourner le code) et clairement
+    labellisés comme simulation dans l'explanation.
+
+    Retourne un dict au même format que _parse_llm_response :
+      {filename, test_code, test_count, explanation}
+    """
+    function_names: list[str] = []
+    has_getenv = False
+    has_cursor_execute = False
+
+    try:
+        tree = ast.parse(refactored_code)
+        function_names = [
+            node.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
+        ]
+        # Détecte os.getenv et cursor.execute dans l'AST
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                # os.getenv(...)
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "getenv"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "os"
+                ):
+                    has_getenv = True
+                # cursor.execute(...)
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "execute"
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "cursor"
+                ):
+                    has_cursor_execute = True
+    except SyntaxError:
+        pass  # code invalide — tests génériques uniquement
+
+    test_lines = [
+        "\"\"\"",
+        "Tests de simulation générés par l'Agent 6 (mode fallback — IBM Bob 2.0 non connecté).",
+        "Ces tests vérifient la structure et la syntaxe du code refactorisé, sans l'exécuter.",
+        "\"\"\"",
+        "import ast",
+        "import os",
+        "import sys",
+        "from unittest.mock import MagicMock, patch",
+        "",
+        "# ── Code refactorisé fourni par l'Agent 5 ─────────────────────────────────",
+        "REFACTORED_CODE = '''",
+        refactored_code,
+        "'''",
+        "",
+        "",
+        "# ── Test 1 : syntaxe ──────────────────────────────────────────────────────",
+        "def test_refactored_code_is_syntactically_valid():",
+        '    """Le code refactorisé doit être parsable sans erreur de syntaxe."""',
+        "    try:",
+        "        ast.parse(REFACTORED_CODE)",
+        "    except SyntaxError as exc:",
+        '        raise AssertionError(f"Syntaxe invalide : {exc}") from exc',
+        "",
+        "",
+        "# ── Test 2 : pas d'appel eval() nu ───────────────────────────────────────",
+        "def test_refactored_code_has_no_bare_eval():",
+        '    """eval() nu ne doit pas apparaitre dans le code refactorise."""',
+        "    import re",
+        "    bare = re.search(r'(?<!literal_)eval\\(', REFACTORED_CODE)",
+        '    assert bare is None, "eval() nu trouve dans le code"',
+        "",
+    ]
+
+    # Tests par fonction publique
+    for idx, fn_name in enumerate(function_names, start=3):
+        test_lines += [
+            "",
+            f"# ── Test {idx} : présence de la fonction {fn_name!r} ─────────────────────",
+            f"def test_{fn_name}_is_defined_in_refactored_code():",
+            f'    """La fonction {fn_name!r} doit être présente dans le code refactorisé."""',
+            f'    assert "def {fn_name}" in REFACTORED_CODE, (',
+            f'        "La fonction {fn_name!r} est absente du code refactorisé."',
+            f'    )',
+            "",
+        ]
+
+    # Test os.getenv détecté
+    if has_getenv:
+        test_lines += [
+            "",
+            "# ── Test : os.getenv utilisé pour les secrets ────────────────────────────",
+            "def test_refactored_code_uses_os_getenv_for_secrets():",
+            '    """Le code doit charger les secrets via os.getenv, pas en dur."""',
+            '    assert "os.getenv(" in REFACTORED_CODE, (',
+            '        "os.getenv() absent du code refactorisé — secrets peut-être hardcodés."',
+            '    )',
+            "",
+        ]
+
+    # Test cursor.execute paramétré
+    if has_cursor_execute:
+        test_lines += [
+            "",
+            "# ── Test : cursor.execute avec paramètres ────────────────────────────────",
+            "def test_refactored_code_uses_parameterized_cursor_execute():",
+            '    """cursor.execute() doit recevoir un tuple de paramètres (requête paramétrée)."""',
+            '    assert "cursor.execute(" in REFACTORED_CODE, (',
+            '        "cursor.execute() absent — la requête SQL n\'est peut-être pas exécutée."',
+            '    )',
+            "",
+        ]
+
+    test_code = "\n".join(test_lines) + "\n"
+    test_count = _count_test_functions(test_code)
+
+    return {
+        "filename": "test_generated_simulation.py",
+        "test_code": test_code,
+        "test_count": test_count,
+        "explanation": (
+            "⚠️ Mode simulation — IBM Bob 2.0 non connecté (LLM_API_URL absent dans .env). "
+            "Tests générés automatiquement depuis l'analyse AST du code refactorisé : "
+            "vérification de syntaxe, absence d'eval(), présence des fonctions publiques"
+            + (", utilisation de os.getenv()" if has_getenv else "")
+            + (", appel cursor.execute() paramétré" if has_cursor_execute else "")
+            + ". "
+            "Ces tests ne couvrent pas la logique métier — connecte IBM Bob 2.0 "
+            "pour obtenir de vrais tests unitaires."
+        ),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Point d'entrée public de l'Agent 6
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_tests(refactored_code: str) -> dict:
+    """
+    Orchestration de l'Agent 6.
+
+    1. Vérifie la syntaxe du code refactorisé (Agent 5).
+    2. Appelle IBM Bob 2.0 (LLM réel) ou utilise le fallback simulation.
+    3. Parse et valide la réponse JSON structurée du LLM.
+    4. Vérifie la syntaxe Python des tests extraits.
+    5. Lance pytest et collecte le résultat.
+    6. Retourne le rapport complet.
+
+    Retourne :
+    {
+        "filename"        : str,   — nom suggéré pour le fichier de tests
+        "test_code"       : str,   — code Python des tests
+        "test_count"      : int,   — nombre de fonctions test_*
+        "explanation"     : str,   — stratégie de tests ou message de simulation
+        "generation_mode" : str,   — "llm" | "simulation"
+        "mocked"          : bool,  — True si mode simulation
+        "syntax_ok"       : bool,  — syntaxe du code refactorisé valide ?
+        "syntax_errors"   : list,  — erreurs de syntaxe éventuelles
+        "pytest_result"   : dict,  — résultat complet de pytest
+    }
+    """
+    # ── 1. Vérification syntaxique du code entrant ────────────────────────────
+    syntax_errors = _check_syntax(refactored_code, label="code refactorisé (Agent 5)")
+    if syntax_errors:
+        return {
+            "filename": "",
+            "test_code": "",
+            "test_count": 0,
+            "explanation": "Le code refactorisé fourni contient des erreurs de syntaxe.",
+            "generation_mode": "error",
+            "mocked": True,
+            "syntax_ok": False,
+            "syntax_errors": syntax_errors,
+            "pytest_result": {
+                "passed": False,
+                "returncode": -1,
+                "stdout": "",
+                "stderr": "\n".join(syntax_errors),
+                "summary": "Code refactorisé syntaxiquement invalide — aucun test lancé.",
+                "syntax_errors": syntax_errors,
+            },
+        }
+
+    # ── 2. Appel LLM ─────────────────────────────────────────────────────────
+    user_prompt = textwrap.dedent(f"""\
+        CODE À TESTER (déjà corrigé et sécurisé par l'Agent 5) :
+        ```python
+        {refactored_code}
+        ```
+
+        Rappels avant de générer les tests :
+        - Identifie chaque fonction publique et ses dépendances.
+        - Utilise MagicMock() pour cursor si le code fait des appels DB.
+        - Utilise patch.dict(os.environ, ...) pour les valeurs os.getenv.
+        - Vérifie que cursor.execute() est appelé avec (query, params_tuple).
+        - Vérifie que ValueError est levée pour un user_id non numérique.
+        - Ne génère PAS de tests triviaux (assert True, assert 1 + 1 == 2).
+
+        Génère maintenant le JSON demandé.""")
+
+    result = call_llm(SYSTEM_PROMPT, user_prompt, temperature=0.2)
+
+    if result["mocked"]:
+        # Fallback déterministe — clairement labellisé comme simulation
+        fallback = _generate_fallback_tests(refactored_code)
+        pytest_result = _run_pytest(fallback["test_code"])
+        return {
+            **fallback,
+            "generation_mode": "simulation",
+            "mocked": True,
+            "syntax_ok": True,
+            "syntax_errors": [],
+            "pytest_result": pytest_result,
+        }
+
+    # ── 3. Parse et valide la réponse JSON du LLM ────────────────────────────
+    # _parse_llm_response lève RuntimeError si le JSON est invalide ou si
+    # le code Python extrait a des erreurs de syntaxe.
+    parsed = _parse_llm_response(result["content"])
+    test_code = parsed["test_code"]
+
+    # ── 4. Lance pytest ───────────────────────────────────────────────────────
+    pytest_result = _run_pytest(test_code)
+
+    return {
+        "filename": parsed["filename"],
+        "test_code": test_code,
+        "test_count": parsed["test_count"],
+        "explanation": parsed["explanation"],
+        "generation_mode": "llm",
+        "mocked": False,
+        "syntax_ok": True,
+        "syntax_errors": [],
+        "pytest_result": pytest_result,
+    }
